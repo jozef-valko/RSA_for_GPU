@@ -1,0 +1,9 @@
+
+RSA sifrovaci a desifrovaci program.
+Autor: Jozef Valko
+Pouzitie: [-h] [-b] [-g] [-e] [-d] [key_filename] [input_file] [output_file]
+[-h]: Vypis tohto help-u.
+[-b]: Zapnutie debug modu. Pocas vykonavania programu sa budu vypisovat hlasky, co prave program robi.
+[-g]: Vygenerovanie sukromneho a verejneho kluca. Vzhladom na maximalny rozsah premennych a aritmetiku spojenu so sifrovanim a desifrovanim su kluce velke max 32 bitov. Vygenerovane kluce sa ulozia do suborov rsakey a rsakey.pub. Pouzivatel si moze specifikovat nazov suboru, kam sa ulozia kluce argumentom [key filename]. Kluce sa ulozia do suborov <key_filename> a <key_filename>.pub.
+[-e]: Zasifrovanie vstupneho retazca znakov alebo zasifrovanie vstupneho suboru s vygenerovanym klucom. Za prepinacom musi nasledovat [key_filename], subor s klucom, pomocou ktoreho sa bude sifrovat. Nasleduje vstupny subor, ktory sa zasifruje a ulozi do suboru [output_file] alebo do cipher.txt ak pouzivatel nespecifikuje [output_file].
+[-d]: Desifrovanie vstupneho suboru s danym klucom. Za prepinacom musi nasledovat [key_filename], subor s klucom, pomocou ktoreho sa bude desifrovat. Nasleduje vstupny zasifrovany subor, ktory sa desifruje a vystup sa ulozi do suboru [output_file] alebo do output.txt ak pouzivatel nespecifikuje [output_file].
