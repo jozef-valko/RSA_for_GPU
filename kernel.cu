@@ -33,53 +33,26 @@ struct message {
 
 __device__ unsigned long long rsa_modExp(unsigned long long b, unsigned long long e, unsigned long long m)
 {
-	if (b < 0 || e < 0 || m <= 0) {
-		printf("Error of arguments!\n");
-		return NULL;
+	if (m == 1) {
+		return 0;
 	}
+	unsigned long long result = 1;
 	b = b % m;
-	if (e == 0)
-		return 1;
-	if (e == 1)
-		return b;
-	if (e % 2 == 0) {
-		return (rsa_modExp(b * b % m, e / 2, m) % m);
+	while (e > 0) {
+		if (e % 2 == 1) {
+			result = (result * b) % m;
+		}
+		e = e >> 1;
+		b = (b * b) % m;
 	}
-	if (e % 2 == 1) {
-		return (b * rsa_modExp(b, (e - 1), m) % m);
-	}
-	return NULL;
+	return result;
 }
 
-__global__ void encrypt(unsigned long long e, unsigned long long n, int bufSize, unsigned long long numBlocks, unsigned char *message, unsigned long long *encrypted) {
+__global__ void encrypt(unsigned long long e, unsigned long long n, unsigned long long numBlocks, unsigned long long *encrypted) {
 	int blockId = blockIdx.y * gridDim.x + blockIdx.x;
 	int threadId = blockId * blockDim.x + threadIdx.x;
 	if (threadId < numBlocks) {
-		unsigned char *buf;
-		int j, flag = 0;
-		unsigned long long tempNumber = 0;
-		buf = (unsigned char*)malloc(bufSize * sizeof(unsigned char));
-		for (j = 0; j < bufSize; j++) {
-			if (!flag) {
-				buf[j] = *(message + threadId * bufSize + j);
-				if ((threadId == numBlocks - 1) && buf[j] == 255) {
-					flag = 1;
-				}
-			}
-			else {
-				buf[j] = 0;
-			}
-		}
-		//print_hex(buf, bufSize);
-		tempNumber = buf[0];
-		for (j = 1; j < bufSize; j++) {
-			tempNumber = tempNumber << 8;
-			tempNumber += buf[j];
-		}
-		//printf("%d. Message is %llu\n", i + 1, tempNumber);
-		encrypted[threadId] = rsa_modExp(tempNumber, e, n);
-		//printf("Encrypted: %llu\n", encrypted);
-		free(buf);
+		encrypted[threadId] = rsa_modExp(encrypted[threadId], e, n);
 	}
 }
 
@@ -225,8 +198,8 @@ void rsa_encrypt(unsigned long long e, unsigned long long n, int bufSize, struct
 	int i, j, flag = 0;
 	unsigned long long *encrypted;
 	unsigned long long *d_encrypted;
-	unsigned char *d_message;
-	unsigned long long tempNumber = 0;
+	unsigned char *buf;
+	clock_t begin, end;
 	float time_spent;
 	cudaError_t cudaStatus;
 	if (cipher == NULL) {
@@ -234,6 +207,33 @@ void rsa_encrypt(unsigned long long e, unsigned long long n, int bufSize, struct
 	}
 
 	encrypted = (unsigned long long *)malloc(message.numBlocks * sizeof(unsigned long long));
+	buf = (unsigned char*)malloc(bufSize * sizeof(unsigned char));
+	begin = clock();
+	for (i = 0; i < message.numBlocks; i++) {
+		for (j = 0; j < bufSize; j++) {
+			if (!flag) {
+				buf[j] = *(message.msg + i * bufSize + j);
+				if ((i == message.numBlocks - 1) && buf[j] == 255) {
+					flag = 1;
+				}
+			}
+			else {
+				buf[j] = 0;
+			}
+		}
+		//print_hex(buf, bufSize);
+		encrypted[i] = buf[0];
+		for (j = 1; j < bufSize; j++) {
+			encrypted[i] = encrypted[i] << 8;
+			encrypted[i] += buf[j];
+		}
+	}
+	free(buf);
+	end = clock();
+	time_spent = ((double)(end - begin) / CLOCKS_PER_SEC) * 1000;
+	if (debug) {
+		printf("Priprava blokov na sifrovanie trvala %lf ms.\n", time_spent);
+	}
 
 	cudaStatus = cudaMalloc(&d_encrypted, message.numBlocks * sizeof(unsigned long long));
 	if (cudaStatus != cudaSuccess) {
@@ -244,23 +244,12 @@ void rsa_encrypt(unsigned long long e, unsigned long long n, int bufSize, struct
 		exit(1);
 	}
 
-	cudaStatus = cudaMalloc(&d_message, message.size * sizeof(unsigned char));
-	if (cudaStatus != cudaSuccess) {
-		fprintf(stderr, "[rsa_encrypt]: Zlyhalo alokovanie d_message!\n");
-		cudaFree(d_encrypted);
-		cudaFree(d_message);
-		free(encrypted);
-		free(message.msg);
-		exit(1);
-	}
-
-	cudaStatus = cudaMemcpy(d_message, message.msg, message.size * sizeof(unsigned char), cudaMemcpyHostToDevice);
+	cudaStatus = cudaMemcpy(d_encrypted, encrypted, message.numBlocks * sizeof(unsigned long long), cudaMemcpyHostToDevice);
 	if (cudaStatus != cudaSuccess) {
 		cudaFree(d_encrypted);
-		cudaFree(d_message);
 		free(encrypted);
 		free(message.msg);
-		fprintf(stderr, "[rsa_encrypt]: Zlyhalo kopirovanie vstupneho buffra!\n");
+		fprintf(stderr, "[rsa_encrypt]: Zlyhalo kopirovanie vstupneho buffra d_encrypted!\n");
 		exit(1);
 	}
 
@@ -275,7 +264,6 @@ void rsa_encrypt(unsigned long long e, unsigned long long n, int bufSize, struct
 			if (gridDim.y > MAX_DIM) {
 				fprintf(stderr, "[rsa_encrypt]: Prekroceny maximalny limit pamate na GPU!\n");
 				cudaFree(d_encrypted);
-				cudaFree(d_message);
 				free(encrypted);
 				free(message.msg);
 				exit(1);
@@ -292,13 +280,12 @@ void rsa_encrypt(unsigned long long e, unsigned long long n, int bufSize, struct
 	cudaEventCreate(&stop);
 	cudaEventRecord(start, 0);
 
-	encrypt << <gridDim, blockDim >> > (e, n, bufSize, message.numBlocks, d_message, d_encrypted);
-	//zmenit hodnotu registra od Kupka
+	encrypt << <gridDim, blockDim >> > (e, n, message.numBlocks, d_encrypted);
+	
 	cudaStatus = cudaGetLastError();
 	if (cudaStatus != cudaSuccess) {
 		fprintf(stderr, "[rsa_encrypt]: Sifrovanie zlyhalo: %s\n", cudaGetErrorString(cudaStatus));
 		cudaFree(d_encrypted);
-		cudaFree(d_message);
 		free(encrypted);
 		free(message.msg);
 		exit(1);
@@ -309,7 +296,6 @@ void rsa_encrypt(unsigned long long e, unsigned long long n, int bufSize, struct
 		fprintf(stderr, "[rsa_encrypt]: cudaDeviceSynchronize vratila chybovy kod %d po spusteni kernelu!\n", cudaStatus);
 		fprintf(stderr, "[rsa_encrypt]: Sifrovanie zlyhalo: %s\n", cudaGetErrorString(cudaStatus));
 		cudaFree(d_encrypted);
-		cudaFree(d_message);
 		free(encrypted);
 		free(message.msg);
 		exit(1);
@@ -330,7 +316,6 @@ void rsa_encrypt(unsigned long long e, unsigned long long n, int bufSize, struct
 		fprintf(stderr, "[rsa_encrypt]: Zlyhalo kopirovanie vystupneho buffra!\n");
 		fprintf(stderr, "[rsa_encrypt]: Sifrovanie zlyhalo: %s\n", cudaGetErrorString(cudaStatus));
 		cudaFree(d_encrypted);
-		cudaFree(d_message);
 		free(encrypted);
 		free(message.msg);
 		exit(1);
@@ -338,16 +323,20 @@ void rsa_encrypt(unsigned long long e, unsigned long long n, int bufSize, struct
 
 	FILE *cipher_file;
 	cipher_file = fopen(cipher, "w");
+	begin = clock();
 	for (i = 0; i < message.numBlocks; i++) {
 		fprintf(cipher_file, "%llu ", encrypted[i]);
 	}
 	fclose(cipher_file);
+	end = clock();
+	time_spent = ((double)(end - begin) / CLOCKS_PER_SEC) * 1000;
+	if (debug) {
+		printf("Zapis sifry do suboru trval %lf ms.\n", time_spent);
+	}
 	if (debug) {
 		printf("Sifrovanie dokoncene. Sifra je ulozena v subore %s.\n", cipher);
 	}
-	
 	cudaFree(d_encrypted);
-	cudaFree(d_message);
 	free(encrypted);
 	free(message.msg);
 }
