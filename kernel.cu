@@ -8,6 +8,7 @@
 #include <math.h>
 #include <string.h>
 
+#define MAX_KEYBOARD_INPUT 1023
 #define MAX_BLOCKS 131072
 #define MAX_DIM 512
 
@@ -30,23 +31,6 @@ struct message {
 	unsigned long long size;
 	unsigned long long numBlocks;
 };
-
-//__device__ unsigned long long rsa_modExp(unsigned long long b, unsigned long long e, unsigned long long m)
-//{
-//	if (m == 1) {
-//		return 0;
-//	}
-//	unsigned long long result = 1;
-//	b = b % m;
-//	while (e > 0) {
-//		if (e % 2 == 1) {
-//			result = (result * b) % m;
-//		}
-//		e = e >> 1;
-//		b = (b * b) % m;
-//	}
-//	return result;
-//}
 
 __global__ void rsa_modExp(unsigned long long e, unsigned long long n, unsigned long long numBlocks, unsigned long long *encrypted) {
 	int blockId = blockIdx.y * gridDim.x + blockIdx.x;
@@ -216,9 +200,6 @@ void rsa_encrypt(unsigned long long e, unsigned long long n, int bufSize, struct
 	clock_t begin, end;
 	float time_spent;
 	cudaError_t cudaStatus;
-	if (cipher == NULL) {
-		cipher = "cipher";
-	}
 
 	encrypted = (unsigned long long *)malloc(message.numBlocks * sizeof(unsigned long long));
 	buf = (unsigned char*)malloc(bufSize * sizeof(unsigned char));
@@ -246,12 +227,17 @@ void rsa_encrypt(unsigned long long e, unsigned long long n, int bufSize, struct
 	end = clock();
 	time_spent = ((double)(end - begin) / CLOCKS_PER_SEC) * 1000;
 	if (debug) {
-		printf("Priprava blokov na sifrovanie trvala %lf ms.\n", time_spent);
+		printf("Priprava blokov na sifrovanie trvala %lf ms\n", time_spent);
 	}
 
+	cudaEvent_t start, stop;
+	cudaEventCreate(&start);
+	cudaEventCreate(&stop);
+	cudaEventRecord(start, 0);
+	
 	cudaStatus = cudaMalloc(&d_encrypted, message.numBlocks * sizeof(unsigned long long));
 	if (cudaStatus != cudaSuccess) {
-		fprintf(stderr, "[rsa_encrypt]: Zlyhalo alokovanie d_encrypted!\n");
+		fprintf(stderr, "[rsa_encrypt]: Zlyhalo alokovanie d_encrypted\n");
 		cudaFree(d_encrypted);
 		free(encrypted);
 		free(message.msg);
@@ -263,7 +249,7 @@ void rsa_encrypt(unsigned long long e, unsigned long long n, int bufSize, struct
 		cudaFree(d_encrypted);
 		free(encrypted);
 		free(message.msg);
-		fprintf(stderr, "[rsa_encrypt]: Zlyhalo kopirovanie vstupneho buffra d_encrypted!\n");
+		fprintf(stderr, "[rsa_encrypt]: Zlyhalo kopirovanie vstupneho buffra d_encrypted\n");
 		exit(1);
 	}
 
@@ -276,7 +262,7 @@ void rsa_encrypt(unsigned long long e, unsigned long long n, int bufSize, struct
 			gridDim.y = gridDim.x / MAX_DIM + 1;
 			gridDim.x = MAX_DIM;
 			if (gridDim.y > MAX_DIM) {
-				fprintf(stderr, "[rsa_encrypt]: Prekroceny maximalny limit pamate na GPU!\n");
+				fprintf(stderr, "[rsa_encrypt]: Prekroceny maximalny limit pamate na GPU\n");
 				cudaFree(d_encrypted);
 				free(encrypted);
 				free(message.msg);
@@ -288,11 +274,6 @@ void rsa_encrypt(unsigned long long e, unsigned long long n, int bufSize, struct
 	if (debug) {
 		printf("Rozmer mriezky blokov na GPU: %d x %d blokov\nPocet vlakien na blok na GPU: %d\n", gridDim.x, gridDim.y, blockDim);
 	}
-	
-	cudaEvent_t start, stop;
-	cudaEventCreate(&start);
-	cudaEventCreate(&stop);
-	cudaEventRecord(start, 0);
 
 	//spustenie sifrovania na GPU
 	rsa_modExp << <gridDim, blockDim >> > (e, n, message.numBlocks, d_encrypted);
@@ -308,7 +289,7 @@ void rsa_encrypt(unsigned long long e, unsigned long long n, int bufSize, struct
 
 	cudaStatus = cudaDeviceSynchronize();
 	if (cudaStatus != cudaSuccess) {
-		fprintf(stderr, "[rsa_encrypt]: cudaDeviceSynchronize vratila chybovy kod %d po spusteni kernelu!\n", cudaStatus);
+		fprintf(stderr, "[rsa_encrypt]: cudaDeviceSynchronize vratila chybovy kod %d po spusteni kernelu\n", cudaStatus);
 		fprintf(stderr, "[rsa_encrypt]: Sifrovanie zlyhalo: %s\n", cudaGetErrorString(cudaStatus));
 		cudaFree(d_encrypted);
 		free(encrypted);
@@ -323,12 +304,12 @@ void rsa_encrypt(unsigned long long e, unsigned long long n, int bufSize, struct
 	cudaEventDestroy(stop);
 
 	if (debug) {
-		printf("Sifrovanie zabralo %.2f ms.\n", time_spent);
+		printf("Sifrovanie trvalo %.2f ms\n", time_spent);
 	}
 
 	cudaStatus = cudaMemcpy(encrypted, d_encrypted, message.numBlocks * sizeof(unsigned long long), cudaMemcpyDeviceToHost);
 	if (cudaStatus != cudaSuccess) {
-		fprintf(stderr, "[rsa_encrypt]: Zlyhalo kopirovanie vystupneho buffra!\n");
+		fprintf(stderr, "[rsa_encrypt]: Zlyhalo kopirovanie vystupneho buffra\n");
 		fprintf(stderr, "[rsa_encrypt]: Sifrovanie zlyhalo: %s\n", cudaGetErrorString(cudaStatus));
 		cudaFree(d_encrypted);
 		free(encrypted);
@@ -337,69 +318,98 @@ void rsa_encrypt(unsigned long long e, unsigned long long n, int bufSize, struct
 	}
 
 	FILE *cipher_file;
-	cipher_file = fopen(cipher, "wb");
+	if (cipher != NULL) {
+		cipher_file = fopen(cipher, "wb");
+	}
+	else {
+		freopen(NULL, "wb", stdout);
+		cipher_file = stdout;
+		if (debug) {
+			printf("Zasifrovany text:\n");
+		}
+	}
+
 	begin = clock();
 	unsigned long long sizeWritten = fwrite(encrypted, sizeof(unsigned long long), message.numBlocks, cipher_file);
-	fclose(cipher_file);
+	if (cipher != NULL) {
+		fclose(cipher_file);
+	}
+
 	if (sizeWritten != message.numBlocks) {
-		fprintf(stderr, "Nepodarilo sa ulozit sifru do suboru!\n");
-		cudaFree(d_encrypted);
+		fprintf(stderr, "[rsa_encrypt]: Nepodarilo sa ulozit sifru do suboru\n");
 		free(encrypted);
-		free(message.msg);
 		exit(1);
 	}
 	end = clock();
 	time_spent = ((double)(end - begin) / CLOCKS_PER_SEC) * 1000;
-	if (debug) {
-		printf("Zapis sifry do suboru trval %lf ms.\n", time_spent);
+	if (debug && cipher != NULL) {
+		printf("Zapis sifry na vystup trval %lf ms\n", time_spent);
+		printf("Sifrovanie dokoncene. Sifra je ulozena v subore %s\n", cipher);
 	}
-	if (debug) {
-		printf("Sifrovanie dokoncene. Sifra je ulozena v subore %s.\n", cipher);
+	else if (debug) {
+		printf("\nZapis sifry na vystup trval %lf ms\n", time_spent);
+		printf("Sifrovanie dokoncene. Sifra je na stdout\n");
 	}
 	cudaFree(d_encrypted);
 	free(encrypted);
 	free(message.msg);
 }
 
-void rsa_decrypt(unsigned long long d, unsigned long long n, int bufSize, char *cipher, char *output)
+void rsa_decrypt(unsigned long long d, unsigned long long n, int bufSize, char *input, char *output)
 {
-	unsigned long long *temp, c;
 	unsigned long long *d_decrypted;
 	unsigned long long *decrypted;
-	unsigned long long sizeOfFile, sizeRead;
 	unsigned long long numBlocks;
-	struct message decMsg;
+	unsigned long long sizeOfFile;
 	cudaError_t cudaStatus;
+	clock_t begin, end;
 	float time_spent;
 	int i;
 	FILE *output_file, *cipher_file;
-	cipher_file = fopen(cipher, "rb");
-	fseek(cipher_file, 0, SEEK_END);
-	sizeOfFile = ftell(cipher_file);
-	rewind(cipher_file);
-	if (sizeOfFile > 0) {
+	
+	begin = clock();
+	if (input != NULL) {
+		cipher_file = fopen(input, "rb");
+		fseek(cipher_file, 0, SEEK_END);
+		sizeOfFile = ftell(cipher_file);
+		rewind(cipher_file);
+		sizeOfFile /= 8;
 		decrypted = (unsigned long long *)malloc(sizeof(unsigned long long) * sizeOfFile);
+		if (!decrypted) {
+			fprintf(stderr, "[rsa_decrypt]Alokacia pamate pre decrypted zlyhala\n");
+			exit(1);
+		}
 		numBlocks = fread(decrypted, sizeof(unsigned long long), sizeOfFile, cipher_file);
+		fclose(cipher_file);
 	}
 	else {
-		//co spravit ak nacitam prazdny subor?
+		freopen(NULL, "rb", stdin);
+		cipher_file = stdin;
+		fseek(cipher_file, 0, SEEK_END);
+		sizeOfFile = ftell(cipher_file);
+		rewind(cipher_file);
+		if (sizeOfFile > 0) {
+			decrypted = (unsigned long long *)malloc(sizeof(unsigned long long) * sizeOfFile);
+			numBlocks = fread(decrypted, sizeof(unsigned long long), sizeOfFile, cipher_file);
+		}
+		else {
+			fprintf(stderr, "Pokus o zadanie sifry manualne z klavesnice\n");
+			exit(1);
+		}
 	}
-	fclose(cipher_file);
-	temp = (unsigned long long *)realloc(decrypted, numBlocks * sizeof(unsigned long long));
-	if (temp) {
-		decrypted = temp;
+	end = clock();
+	time_spent = ((double)(end - begin) / CLOCKS_PER_SEC) * 1000;
+	if (debug) {
+		printf("Nacitanie sifry zabralo %lf ms.\n", time_spent);
+		printf("Pocet blokov: %llu\n", numBlocks);
 	}
-	else {
-		fprintf(stderr, "[rsa_decrypt]: Realokacia pamate zlyhala.\n");
-		exit(1);
-	}
+	realloc(decrypted, numBlocks * sizeof(unsigned long long));
 	
 	cudaStatus = cudaMalloc(&d_decrypted, numBlocks * sizeof(unsigned long long));
 	if (cudaStatus != cudaSuccess) {
-		fprintf(stderr, "[rsa_decrypt]: Zlyhalo alokovanie d_decrypted!\n");
+		fprintf(stderr, "[rsa_decrypt]: Zlyhalo alokovanie d_decrypted\n");
 		cudaFree(d_decrypted);
 		free(decrypted);
-		free(temp);
 		exit(1);
 	}
 
@@ -407,8 +417,7 @@ void rsa_decrypt(unsigned long long d, unsigned long long n, int bufSize, char *
 	if (cudaStatus != cudaSuccess) {
 		cudaFree(d_decrypted);
 		free(decrypted);
-		free(temp);
-		fprintf(stderr, "[rsa_decrypt]: Zlyhalo kopirovanie vstupneho buffra d_decrypted!\n");
+		fprintf(stderr, "[rsa_decrypt]: Zlyhalo kopirovanie vstupneho buffra d_decrypted\n");
 		exit(1);
 	}
 
@@ -421,10 +430,9 @@ void rsa_decrypt(unsigned long long d, unsigned long long n, int bufSize, char *
 			gridDim.y = gridDim.x / MAX_DIM + 1;
 			gridDim.x = MAX_DIM;
 			if (gridDim.y > MAX_DIM) {
-				fprintf(stderr, "[rsa_decrypt]: Prekroceny maximalny limit pamate na GPU!\n");
+				fprintf(stderr, "[rsa_decrypt]: Prekroceny maximalny limit pamate na GPU\n");
 				cudaFree(d_decrypted);
 				free(decrypted);
-				free(temp);
 				exit(1);
 			}
 		}
@@ -447,17 +455,15 @@ void rsa_decrypt(unsigned long long d, unsigned long long n, int bufSize, char *
 		fprintf(stderr, "[rsa_decrypt]: Desifrovanie zlyhalo: %s\n", cudaGetErrorString(cudaStatus));
 		cudaFree(d_decrypted);
 		free(decrypted);
-		free(temp);
 		exit(1);
 	}
 
 	cudaStatus = cudaDeviceSynchronize();
 	if (cudaStatus != cudaSuccess) {
-		fprintf(stderr, "[rsa_decrypt]: cudaDeviceSynchronize vratila chybovy kod %d po spusteni kernelu!\n", cudaStatus);
+		fprintf(stderr, "[rsa_decrypt]: cudaDeviceSynchronize vratila chybovy kod %d po spusteni kernelu\n", cudaStatus);
 		fprintf(stderr, "[rsa_decrypt]: Desifrovanie zlyhalo: %s\n", cudaGetErrorString(cudaStatus));
 		cudaFree(d_decrypted);
 		free(decrypted);
-		free(temp);
 		exit(1);
 	}
 
@@ -468,16 +474,15 @@ void rsa_decrypt(unsigned long long d, unsigned long long n, int bufSize, char *
 	cudaEventDestroy(stop);
 
 	if (debug) {
-		printf("Desifrovanie zabralo %.2f ms.\n", time_spent);
+		printf("Desifrovanie trvalo %.2f ms\n", time_spent);
 	}
 
 	cudaStatus = cudaMemcpy(decrypted, d_decrypted, numBlocks * sizeof(unsigned long long), cudaMemcpyDeviceToHost);
 	if (cudaStatus != cudaSuccess) {
-		fprintf(stderr, "[rsa_decrypt]: Zlyhalo kopirovanie vystupneho buffra!\n");
+		fprintf(stderr, "[rsa_decrypt]: Zlyhalo kopirovanie vystupneho buffra\n");
 		fprintf(stderr, "[rsa_decrypt]: Desifrovanie zlyhalo: %s\n", cudaGetErrorString(cudaStatus));
 		cudaFree(d_decrypted);
 		free(decrypted);
-		free(temp);
 		exit(1);
 	}
 
@@ -490,6 +495,9 @@ void rsa_decrypt(unsigned long long d, unsigned long long n, int bufSize, char *
 			printf("Desifrovany text:\n");
 		}
 	}
+	
+	begin = clock();
+	struct message decMsg;
 	for (i = 0; i < numBlocks - 1; i++) {
 		//printf("Decrypted: %llu\n", decrypted);
 		decMsg = intToStr(bufSize, decrypted[i], 0);
@@ -497,22 +505,26 @@ void rsa_decrypt(unsigned long long d, unsigned long long n, int bufSize, char *
 	}
 	decMsg = intToStr(bufSize, decrypted[i], 1);
 	fwrite(decMsg.msg, 1, decMsg.size, output_file);
+	end = clock();
+	time_spent = ((double)(end - begin) / CLOCKS_PER_SEC) * 1000;
 
 	if (output != NULL) {
 		fclose(output_file);
 	}
 	if (debug && output != NULL) {
-		printf("\nDesifrovanie dokoncene. Vystup je ulozeny v subore %s.\n", output);
+		printf("Zapis desifrovanej spravy do suboru trval %lf ms\n", time_spent);
+		printf("Desifrovanie dokoncene. Vystup je ulozeny v subore %s\n", output);
 	}
 	else if (debug) {
-		printf("\nDesifrovanie dokoncene. Vystup je na stdout.\n");
+		printf("\nZapis spravy na vystup %lf ms\n", time_spent);
+		printf("Desifrovanie dokoncene. Vystup je na stdout\n");
 	}
 }
 
 struct message inputString(char *input, long long bufSize) {
 	FILE *input_file;
 	struct message message;
-	long sizeOfFile = 0;
+	unsigned long long sizeOfFile;
 	//nacitanie suboru do buffra
 	if (input != NULL) {
 		input_file = fopen(input, "rb");
@@ -520,39 +532,45 @@ struct message inputString(char *input, long long bufSize) {
 		sizeOfFile = ftell(input_file);
 		rewind(input_file);
 		if (debug) {
-			printf("Velkost suboru je:\t\t%ld\n", sizeOfFile);
+			printf("Velkost suboru je:\t\t%llu\n", sizeOfFile);
 		}
 		message.msg = (unsigned char *)malloc(sizeof(unsigned char) * (sizeOfFile + 1));
 		message.size = fread(message.msg, 1, sizeOfFile, input_file);
+		if (debug) {
+			printf("Nacitana velkost suboru je:\t%llu\n", message.size);
+		}
 		message.msg[sizeOfFile] = 255;
 		message.size++;
 		fclose(input_file);
 	}
-	//nacitanie znakov zo standardneho vstupu
-	/*else {
+	//nacitanie suboru zo standardneho vstupu
+	else {
 		freopen(NULL, "rb", stdin);
 		input_file = stdin;
 		fseek(input_file, 0, SEEK_END);
 		sizeOfFile = ftell(input_file);
 		fseek(input_file, 0, SEEK_SET);
 		if (sizeOfFile > 0) {
+			//citanie suboru zo stdin
 			if (debug) {
-				printf("Velkost suboru je:\t\t%ld\n", sizeOfFile);
+				printf("Velkost suboru je:\t\t%llu\n", sizeOfFile);
 			}
-			message = (unsigned char *)malloc(sizeof(unsigned char) * sizeOfFile);
-			sizeOfFile = fread(message, sizeof(unsigned char), sizeOfFile, input_file);
+			message.msg = (unsigned char *)malloc(sizeof(unsigned char) * sizeOfFile);
+			message.size = fread(message.msg, 1, sizeOfFile, input_file);
 			if (debug) {
-				printf("Nacitana velkost suboru je:\t%ld\n", sizeOfFile);
+				printf("Nacitana velkost suboru je:\t%llu\n", message.size);
 			}
-			message[sizeOfFile] = '\0';
+			message.msg[message.size++] = 255;
 		}
 		else {
-			message = (unsigned char *)malloc(sizeof(unsigned char) * 1024);
-			fgets((char*)message, 1023, input_file);
-			sizeOfFile = strlen((char*)message);
-			message[sizeOfFile - 1] = '\0';
+			//nacitanie znakov zo stdin
+			message.msg = (unsigned char *)malloc(sizeof(unsigned char) * (MAX_KEYBOARD_INPUT + 1));
+			fgets((char*)message.msg, MAX_KEYBOARD_INPUT, input_file);
+			message.size = strlen((char*)message.msg);
+			message.msg[message.size++] = 255;
+			sizeOfFile = message.size;
 		}
-	}*/
+	}
 	if (sizeOfFile % bufSize != 0) {
 		message.numBlocks = sizeOfFile / bufSize + 1;
 	}
@@ -579,11 +597,15 @@ int main(int argc, char **argv) {
 	int i, flag = 0;
 	clock_t begin, end;
 	double time_spent;
-	char *output;
+	char *output, *input;
 
 	if (argc > 1) {
 		for (i = 1; i < argc; i++) {
 			if (!strcmp(argv[i], "-b")) {
+				if (argc == 2) {
+					fprintf(stderr, "Malo argumentov, skus znova alebo pouzi -h pre pomoc.\n");
+					return 0;
+				}
 				debug = 1;
 				break;
 			}
@@ -625,6 +647,7 @@ int main(int argc, char **argv) {
 				if (debug) {
 					printf("Kluce boli ulozene do suborov %s and %s...\n", filename1, filename2);
 				}
+				return 0;
 			}
 			else if (!strcmp(argv[i], "-e") || !strcmp(argv[i], "-d")) {
 				i++;
@@ -670,12 +693,15 @@ int main(int argc, char **argv) {
 					}
 					i++;
 					if (argv[i] == NULL) {
-						if (debug && !strcmp(argv[i - 2], "-e")) {
+						if (debug) {
 							printf("Nebol zadany vstupny subor, citam stdin.\n");
 						}
+						input = NULL;
 						output = NULL;
 					}
 					else {
+						input = (char*)malloc(strlen(argv[i]) * sizeof(char));
+						strcpy(input, argv[i]);
 						if (argv[i + 1] != NULL) {
 							output = (char*)malloc(strlen(argv[i + 1]) * sizeof(char));
 							strcpy(output, argv[i + 1]);
@@ -689,15 +715,15 @@ int main(int argc, char **argv) {
 						struct message message;
 						begin = clock();
 						//nacitanie vstupu do buffra
-						message = inputString(argv[i], bufSize);
+						message = inputString(input, bufSize);
 						if (message.msg == NULL) {
 							fprintf(stderr, "Chyba pri citani zo vstupu!\n");
 							exit(1);
 						}
 						end = clock();
-						time_spent = (double)(end - begin) / CLOCKS_PER_SEC;
+						time_spent = (double)(end - begin) / CLOCKS_PER_SEC * 1000;
 						if (debug) {
-							printf("Nacitanie spravy zabralo %lf sekund.\n", time_spent);
+							printf("Nacitanie spravy zabralo %lf ms\n", time_spent);
 							printf("Pocet blokov: %llu\n", message.numBlocks);
 						}
 						if (flag) {
@@ -709,26 +735,11 @@ int main(int argc, char **argv) {
 						return 0;
 					}
 					else {
-						if (argv[i] != NULL) {
-							char *cipher;
-							cipher = (char*)malloc(strlen(argv[i]) * sizeof(char));
-							strcpy(cipher, argv[i]);
-							begin = clock();
-							if (flag) {
-								rsa_decrypt(priv->d, priv->n, bufSize, cipher, output);
-							}
-							else {
-								rsa_decrypt(pub->e, pub->n, bufSize, cipher, output);
-							}
-							end = clock();
-							time_spent = (double)(end - begin) / CLOCKS_PER_SEC;
-							if (debug) {
-								printf("Desifrovanie zabralo %lf sekund.\n", time_spent);
-							}
+						if (flag) {
+							rsa_decrypt(priv->d, priv->n, bufSize, input, output);
 						}
 						else {
-							fprintf(stderr, "Nebol zadany vstupny subor na desifrovanie.\n");
-							exit(1);
+							rsa_decrypt(pub->e, pub->n, bufSize, input, output);
 						}
 						return 0;
 					}
